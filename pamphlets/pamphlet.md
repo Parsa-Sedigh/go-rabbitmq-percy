@@ -88,3 +88,23 @@ the messages where they should go.
 - Queue is a buffer for messages. It's usually FIFO.
 
 ### Building the rabbitmq client and a producer
+We would have a program called producer, so create a folder inside `cmd` called `producer`.
+
+`cmd` folder will hold different commands that we can execute.
+
+The `producer` microservice inside cmd folder will send some messages to an exchange.
+
+`github.com/rabbitmq/amqp091-go` is the official supported client for rabbitmq.
+
+A connection in rabbitmq is a TCP connection and you should reuse the connection across your whole app and you should spawn new channels on every
+concurrent task that is running.
+
+**Q:** What's a channel?
+
+A channel is a multiplexed connection(sub connection) over the TCP connection. Think of it as a separate connection, but it's using the same TCP connection.
+So the *amqp.Connection is the TCP connection. `*amqp.Connection` should be reused.
+
+**tip:** You should recreate the channel for each concurrent task but always have one connection. If you spawn connections, you will create
+so many TCP connections and that doesn't scale well.
+
+### Queues, durability and auto-delete
