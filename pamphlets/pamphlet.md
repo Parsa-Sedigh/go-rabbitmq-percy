@@ -108,3 +108,4 @@ So the *amqp.Connection is the TCP connection. `*amqp.Connection` should be reus
 so many TCP connections and that doesn't scale well.
 
 ### Queues, durability and auto-delete
+A durable queue will be persisted
