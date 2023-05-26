@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"fmt"
 	amqp "github.com/rabbitmq/amqp091-go"
 )
@@ -27,7 +28,10 @@ func NewRabbitMQClient(conn *amqp.Connection) (RabbitClient, error) {
 		return RabbitClient{}, err
 	}
 
-	ch.QueueDeclare()
+	// enable the confirm mode
+	if err := ch.Confirm(false); err != nil {
+		return RabbitClient{}, err
+	}
 
 	return RabbitClient{
 		conn: conn,
@@ -39,4 +43,57 @@ func NewRabbitMQClient(conn *amqp.Connection) (RabbitClient, error) {
 func (rc RabbitClient) Close() error {
 	// Note: We only close the channel and we don't want to close the connection yet because we would have other clients using the same connection.
 	return rc.ch.Close()
+}
+
+// CreateQueue is a wrapper around QueueDeclare. So we don't allow the customization of all the params of QueueDeclare. CreateQueue
+// will create a new queue based on given cfgs
+func (rc RabbitClient) CreateQueue(queueName string, durable, autodelete bool) error {
+	_, err := rc.ch.QueueDeclare(queueName, durable, autodelete, false, false, nil)
+	return err
+}
+
+// CreateBinding will bind the current channel to the given exchange using the routingKey provided
+// `name` param is the name of the queue that we wanna bind
+func (rc RabbitClient) CreateBinding(name, binding, exchange string) error {
+	return rc.ch.QueueBind(name, binding, exchange, false, nil)
+}
+
+// Send is a wrapper function to publish payloads onto exchange an exchange with the given routingKey. options is the actual message that we wanna send
+func (rc RabbitClient) Send(ctx context.Context, exchange, routingKey string, options amqp.Publishing) error {
+	//return rc.ch.PublishWithContext(
+	//	ctx,
+	//	exchange,
+	//	routingKey,
+	//	// mandatory is used to determine if an error should be returned upon failure
+	//	true,
+	//	// immediate
+	//	false,
+	//	options,
+	//)
+
+	///////////////////
+
+	confirmation, err := rc.ch.PublishWithDeferredConfirmWithContext(
+		ctx,
+		exchange,
+		routingKey,
+		// mandatory is used to determine if an error should be returned upon failure
+		true,
+		// immediate
+		false,
+		options,
+	)
+	if err != nil {
+		return err
+	}
+
+	// this will block until we receive information about the sent message
+	confirmation.Wait()
+
+	return nil
+}
+
+// Consume is used to consume a queue
+func (rc RabbitClient) Consume(queue, consumer string, autoAck bool) (<-chan amqp.Delivery, error) {
+	return rc.ch.Consume(queue, consumer, autoAck, false, false, false, nil)
 }
