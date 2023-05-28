@@ -22,7 +22,25 @@ func main() {
 	defer client.Close()
 
 	// we named this consumer, email-service because this consumer will receive them and send emails
-	messageBus, err := client.Consume("customers_created", "email-service", false)
+	//messageBus, err := client.Consume("customers_created", "email-service", false)
+	//if err != nil {
+	//	panic(err)
+	//}
+
+	queue, err := client.CreateQueue("", true, true)
+	if err != nil {
+		panic(err)
+	}
+
+	// the binding is empty string because it's fanout so we don't care about the binding
+	/* bound the queue using a fanout exchange named "customer_events".
+	This will allow this client to receive all the events that are produced.*/
+	if err := client.CreateBinding(queue.Name, "", "customer_events"); err != nil {
+		panic(err)
+	}
+
+	// start consuming the queue
+	messageBus, err := client.Consume(queue.Name, "email-service", false)
 	if err != nil {
 		panic(err)
 	}

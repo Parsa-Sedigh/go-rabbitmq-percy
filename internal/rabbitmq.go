@@ -47,9 +47,14 @@ func (rc RabbitClient) Close() error {
 
 // CreateQueue is a wrapper around QueueDeclare. So we don't allow the customization of all the params of QueueDeclare. CreateQueue
 // will create a new queue based on given cfgs
-func (rc RabbitClient) CreateQueue(queueName string, durable, autodelete bool) error {
-	_, err := rc.ch.QueueDeclare(queueName, durable, autodelete, false, false, nil)
-	return err
+func (rc RabbitClient) CreateQueue(queueName string, durable, autodelete bool) (amqp.Queue, error) {
+	q, err := rc.ch.QueueDeclare(queueName, durable, autodelete, false, false, nil)
+
+	if err != nil {
+		return amqp.Queue{}, err
+	}
+
+	return q, err
 }
 
 // CreateBinding will bind the current channel to the given exchange using the routingKey provided

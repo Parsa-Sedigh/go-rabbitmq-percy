@@ -293,4 +293,37 @@ message is actually produced, use this).
 Up until now we've been using FIFO queues.
 
 ### Fanout and publish and subscribe
-In a pub/sub schema you want **all** the consumers to receive all the same messages.
+In a pub/sub schema you want **all** the consumers to receive all the same messages(you don't want to load balance the messages).
+To do this, we use a fanout exchange which will skip topics(routing keys) and will push messages to all the consumers.
+
+Let's delete the current stage. Because it's the wrong type. So run:
+```shell
+docker exec rabbitmq rabbitmqadmin delete exchange name=customer_events --vhost=customers -u parsa -p <password>
+```
+
+Note: You can't change the type of an exchange. You have to delete it and then recreate a new one.
+```shell
+docker exec rabbitmq rabbitmqadmin declare exchange --vhost=customers name=customers_events type=fanout -u parsa -p <password> durable=true
+```
+
+Update the permissions for the new created exchange:
+```shell
+docker exec rabbitmq rabbitmqctl set_topic_permissions -p customers <username> customer_events ".*" ".*"
+```
+
+Note: In a pub/sub , it's most likely that the subscriber is creating the queues and bindings. Because the publisher won't know what queues exist. So put the
+code for creating the queue in consumer, not publisher(producer).
+
+In pub/sub, when creating queues in consumer, we don't specify the name of the queue because the consumer doesn't care about the name, rabbitmq will
+generate those names. You **can** use known names(specify name) but usually when you have pub/sub you might end up with many subscribers(consumers) and
+you don't know the subscribers.
+
+The reason we return the queue in `CreateQueue` when calling it in consumer is because when we create the binding, we need the name of the queue which
+in this case is randomly created by rabbitmq itself and not us.
+
+Now run 2 instances of consumers(using 2 terminal windows) and then run the producer. We will see that all the 10 messages are sent to both consumers(instead
+of having a load balanced strategy). So in the case where you want all the consumers receive all the messages, use fanout.
+
+### RPC procedures
+Producer will send a replyTo: <queue name that the producer is listening on> with each message and the service knows whenever it's done, it will replyTo
+that queue which the producer is listening on
