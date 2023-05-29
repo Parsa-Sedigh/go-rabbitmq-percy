@@ -327,3 +327,9 @@ of having a load balanced strategy). So in the case where you want all the consu
 ### RPC procedures
 Producer will send a replyTo: <queue name that the producer is listening on> with each message and the service knows whenever it's done, it will replyTo
 that queue which the producer is listening on
+
+### Limiting amount of requests using prefetch and quality of service
+
+### Encrypting traffic with TLS
+
+### Configuring rabbitmq with definitions
