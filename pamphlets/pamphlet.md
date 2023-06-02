@@ -99,6 +99,8 @@ The `producer` microservice inside cmd folder will send some messages to an exch
 A connection in rabbitmq is a TCP connection and you should reuse the connection across your whole app and you should spawn new channels on every
 concurrent task that is running.
 
+We should reuse the connection but not consuming and publishing on the same connection.
+
 **Q:** What's a channel?
 
 A channel is a multiplexed connection(sub connection) over the TCP connection. Think of it as a separate connection, but it's using the same TCP connection.
@@ -325,11 +327,188 @@ Now run 2 instances of consumers(using 2 terminal windows) and then run the prod
 of having a load balanced strategy). So in the case where you want all the consumers receive all the messages, use fanout.
 
 ### RPC procedures
-Producer will send a replyTo: <queue name that the producer is listening on> with each message and the service knows whenever it's done, it will replyTo
-that queue which the producer is listening on
+Producer will send a `replyTo: <queue name that the producer is listening on>` with each message and the service knows whenever it's done, it will replyTo
+that queue which the producer is listening on.
+
+Create a direct exchange:
+```shell
+docker exec rabbitmq rabbitmqadmin declare_exchange --vhost=customers name=customer_callbacks type=direct -u <username> -p <password> durable=true
+```
+
+Then we need to fix the permissions:
+```shell
+docker exec rabbitmq rabbitmqctl set_topic_permissions -p customers <username> customer_callbacks ".*" ".*"
+```
+This allows the specified user to do whatever he wants on customer_callbacks.
+
+**Important note:** Previously we said we should always use the same connection(reuse the connections) but this is only true if you're publishing
+and consuming on that channel. If you're doing both at the same time which we will be doing in a RPC because we will be producing messages
+and we will also be listening on the callback, you should never do this on the same connection! Why?
+
+Because if you have a producer which is spamming a LOT of messages, it will be spamming more messages than the server can handle and this means that
+the TCP connection will start accumulating too many messages and rabbitmq will apply backpressure and backpressure will start storing messages in a 
+backlog. Now the consumer who wants to send an acknowledgement to the server, will suffer from the same backpressure. So the backpressure will stop
+the consumer from telling the server that it has processed a message and this will make the whole thing slow.
+
+So: Never reuse connections for both producing and consuming on the same service(never use the same connection for publishing and consuming).
+
+In these cases, like RPC, we should create two connections: one for consuming, one for publishing.
+
+In RPC, we will keep using the unnamed queues and we will also add a `replyTo` to messages.
+
+In consumer.go, create another rabbitmq connection using `ConnectRabbitMQ` function and call the returned connection as `consumeConn` and use this
+new connection to create another client and name it `consumeClient`.
+
+So the producer is creating the queue and waiting for a callback on that queue, but we also need to tell the consumer which queue we're waiting for or 
+where we want the message? This is actually built into rabbitmq and amqp and we can use `ReplyTo` field when sending the messages which happens in
+producer, so that whoever received that message will also know where they should publish the response.
+
+`CorrelationId` is used to track and know which event the message relates to.
+
+Note: Using an incrementing integer to be used in `CorrelationId` is bad!
+
+Now each message that is published, has a `ReplyTo` and a `CorrelationId` which can be used to further along control the messages.
+
+We need to make sure that the consumer also has 2 connections. Because now the consumer will **also publish** messages back(so it would do 2 things:
+consuming and also publishing so we need 2 connections). So create a `publishConn` variable in consumer file.
+
+Restart the consumers and then restart the producer using `go run`.
 
 ### Limiting amount of requests using prefetch and quality of service
+Currently we're using errgroup of golang to limit the amount of goroutines for consuming messages. But we don't have to do this because there's a
+way of imposing limits inside rabbitmq. Rabbitmq allows us to set **prefetch limit**. Prefetch limit tells the rabbitmq server how many
+unacknowledged messages it can send on one channel at a time and this way we can set sth called a hard-limit, so we don't DDOS a service.
+Rabbitmq refers to this as quality of service.
+
+Create a new function called `ApplyQos`.
 
 ### Encrypting traffic with TLS
+```shell
+git clone https://github.com/rabbitmq/tls-gen
+```
+
+The basic will generate basic certificates for you.
+
+```shell
+cd basic
+
+# will create result and testca folders
+make PASSWORD=
+make verify
+```
+The above commands will generate a root CA and all the files that we need to apply TLS.
+
+Now you need to change permissions on the generated files:
+```shell
+# in basic folder:
+sudo chmod 644 result/*
+```
+
+We need to delete the currently running rabbitmq instance, so that we can create a new one with TLS:
+```shell
+sudo docker container rm -f rabbitmq
+```
+
+Now in root of our project, create `rabbitmq.conf`.
+
+We will need to mount this file into rabbitmq when we start it up. When we mount it, we will need to make sure that the certificates that the
+`tls-gen` program generated for us, are applied.
+
+Make sure you're in the root of the project.
+```shell
+# this time, we need a volume. The -v flag is used to mount a folder from your host into the docker container
+docker run -d --name rabbitmq -v "$(pwd)"/rabbitmq.conf:etc/rabbitmq/rabbitmq.conf:ro" -v "$(pwd)"/tls-gen/basic/result:/certs -p 5671:5671 -p  15671:15671 rabbitmq:3.11-management
+```
+Note: `etc/rabbitmq/rabbitmq.conf` is where rabbitmq will expect the configuration to exist.
+
+Note: In above command we added a second volume mount(we have created 2 volume mounts). One for conf file and one for certificates that tls-gen
+script generated(because docker container needs to have access to the certificates).
+
+Note: The specified ports in command are for the networking protocol and the admin UI.
+
+After this, we can add tls configurations to the container by adding configs to the `rabbitmq.conf`(you could do this before running the previous
+command as well).
+
+In rabbitmq.conf we wanna disable any connections that isn't TCP.
+
+`listeners.ssl.default = 5671` means that it by default goes to 5671 port when it's using ssl
+
+**Note:** The file we use for `ssl_options.certfile` will have a different name on each computer based on the name of the computer.
+
+A **Peer verification** is related to **mtls**.
+
+Clients will also send acknowledgments **with their certificates** allowing both sides to send their certificates to verify their identities.
+
+So in rabbitmq.conf we have told rabbitmq:
+- use ssl by default
+- where to find the certificates
+- both sides of the communication should be using tls certificates
+
+Now:
+```shell
+docker restart rabbitmq
+docker logs rabbitmq
+```
+You should see `Started TLS (SSL) listener on [::]:5671`.
+
+To test certificates being applied, you can run for example the producer with a simple `go run` and if certs requirements are applied,
+you should see an error saying: `connect: connection refused` because we're not using the certificates right now when running with go run.
+So we need to update the code to use certificates because now rabbitmq server is expecting encrypted traffic.
+
+To do this, in our own `connect` to add certificates.
+
+Now we loaded the certs, we changed the protocol to `amqps`. Now we need to update the consumer and producer.
+
+**Note:** We will be using hard coded values(absolute paths) to certificates. **You should not!**. We should use env vars.
+
+The ports also need to change from `5671` to `5672`.
+
+Now if you run the programs using `go run`, for example producer, it will timeout and say: `Exception (403) Reason: "username or password not allowed"`
+To see what's going on:
+```shell
+docker logs
+```
+You would see your username has invalid credentials. Why?
+
+We need to set up the permissions and users. We can do this using cli or configuration files or definitions.
+
+Note: We don't want to manage rabbitmq using command line.
+
+To do this, we need to create a hash of our password.
+
+Create a script called `encodepassword.sh`. Note that you need to use your own password when running that shell(maybe use an env var to get it from
+user input instead of hard coding the password in that script).
+
+Then run
+```shell
+bash encodepassword.sh
+```
+Which will output the hashed password.
+
+We use `rabbitmq_definitions.json` to define all the resources that we need instead of using command line commands. In that file, password_hash is
+the output of running the previous command.
+
+In that definitions file, for `permissions` we should define for which user we're specifying the permissions.
+
+Note: Currently we're creating queues inside code, but you can define them in the definitions file as well. We defined an example in the definitions file
+as well for reference.
+
+If we want the queue to always be created from startup and don't want it to be generated from code, we can define it in definitions file.
+
+When doing for example pub/sub or RPC it makes sense to have the code generates the queues. Otherwise, it's good to have the queues generated in the
+definitions file.
 
 ### Configuring rabbitmq with definitions
+Now:
+```shell
+docker container rm -f rabbitmq
+
+# Add another volume for the definitions file(you could mount the whole folder)
+docker run -d --name rabbitmq -v "$(pwd)"/rabbitmq_definitions.json:/etc/rabbitmq/rabbitmq_definitions.json:ro -v "$(pwd)"/rabbitmq.conf:/etc/rabbitmq/rabbitmq.conf:ro -v "$(pwd)"/tls-gen/basic/result:/certs -p 5671:5671 -p 15672:15672 rabbitmq:3.11-management
+
+docker logs rabbitmq
+```
+
+You should see it sets the permissions to the specified user and other logs.
+
+To test things, run the consumers and then run the producer. Everything is now encrypted.

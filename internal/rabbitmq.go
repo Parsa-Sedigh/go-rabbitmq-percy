@@ -2,8 +2,11 @@ package internal
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	amqp "github.com/rabbitmq/amqp091-go"
+	"os"
 )
 
 // RabbitClient is a wrapper around official amqp client which we use to add a bit more functionality
@@ -15,8 +18,32 @@ type RabbitClient struct {
 	ch *amqp.Channel
 }
 
-func ConnectRabbitMQ(username, password, host, vhost string) (*amqp.Connection, error) {
-	return amqp.Dial(fmt.Sprintf("amqp://%s:%s@%s/%s", username, password, host, vhost))
+func ConnectRabbitMQ(username, password, host, vhost, caCert, clientCert, clientKey string) (*amqp.Connection, error) {
+	ca, err := os.ReadFile(caCert)
+	if err != nil {
+		return nil, err
+	}
+
+	// load keypair
+	// loading certs is not related to rabbitmq and would work the same as if you have for example a http client or ...
+	cert, err := tls.LoadX509KeyPair(clientCert, clientKey)
+	if err != nil {
+		return nil, err
+	}
+
+	// add the root CA to the cert pool
+	rootCAs := x509.NewCertPool()
+	rootCAs.AppendCertsFromPEM(ca)
+
+	tlsCfg := &tls.Config{
+		RootCAs:      rootCAs,
+		Certificates: []tls.Certificate{cert},
+	}
+
+	// without TLS:
+	//return amqp.Dial(fmt.Sprintf("amqp://%s:%s@%s/%s", username, password, host, vhost))
+
+	return amqp.DialTLS(fmt.Sprintf("amqps://%s:%s@%s/%s", username, password, host, vhost), tlsCfg)
 }
 
 func NewRabbitMQClient(conn *amqp.Connection) (RabbitClient, error) {
@@ -101,4 +128,12 @@ func (rc RabbitClient) Send(ctx context.Context, exchange, routingKey string, op
 // Consume is used to consume a queue
 func (rc RabbitClient) Consume(queue, consumer string, autoAck bool) (<-chan amqp.Delivery, error) {
 	return rc.ch.Consume(queue, consumer, autoAck, false, false, false, nil)
+}
+
+// ApplyQos
+// prefetch count - an integer on how many unacknowledged messages the server can send
+// prefetch size - is int of how many bytes the queue can have before we're allowed to send more. 0 bytes will be ignored.
+// global - this flag determines if the rule should be applied globally or not
+func (rc RabbitClient) ApplyQos(count, size int, global bool) error {
+	return rc.ch.Qos(count, size, global)
 }
